@@ -1,33 +1,43 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
- */
-package chatapp;
+package server;
 
-/**
- *
- * @author HP
- */ 
+import client.MessageListener;
+import model.Message;
+import model.User;
+import util.Logger;
+
 import javax.swing.*;
 import javax.swing.border.*;
 import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
 import java.io.*;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-public class ChatClient extends JFrame {
+public class ChatServer extends JFrame implements MessageListener {
     private JPanel chatContainer;
     private JScrollPane scrollPane;
     private JTextField messageField;
-    private PrintWriter out;
+    private JLabel statusLabel;
+    private ServerSocket serverSocket;
+    private ClientManager clientManager;
+    private ExecutorService executor;
 
+    // Shadcn Zinc Palette
     private final Color BG_BASE = new Color(9, 9, 11);
     private final Color BORDER = new Color(39, 39, 42);
     private final Color TEXT_PRIMARY = new Color(250, 250, 250);
     private final Color ACCENT_PRIMARY = new Color(250, 250, 250);
     private final Color ACCENT_TEXT = new Color(9, 9, 11);
 
-    public ChatClient() {
-        setTitle("G4 // Client");
+    public ChatServer() {
+        this.clientManager = new ClientManager();
+        this.clientManager.setServer(this);  // Set the server reference in ClientManager
+        this.executor = Executors.newCachedThreadPool();
+
+        setTitle("G4 // Server");
         setSize(450, 700);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
@@ -40,19 +50,19 @@ public class ChatClient extends JFrame {
         header.setBorder(new CompoundBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, BORDER), new EmptyBorder(0, 24, 0, 24)));
         header.setPreferredSize(new Dimension(0, 80));
 
-        JLabel title = new JLabel("Messenger");
+        JLabel title = new JLabel("Server");
         title.setFont(new Font("Inter", Font.BOLD, 16));
         title.setForeground(TEXT_PRIMARY);
-        
-        JLabel status = new JLabel("● Secure Line");
-        status.setForeground(new Color(34, 197, 94));
-        status.setFont(new Font("Inter", Font.BOLD, 12));
+
+        statusLabel = new JLabel("● Standby");
+        statusLabel.setForeground(new Color(161, 161, 170));
+        statusLabel.setFont(new Font("Inter", Font.BOLD, 12));
 
         header.add(title, BorderLayout.WEST);
-        header.add(status, BorderLayout.EAST);
+        header.add(statusLabel, BorderLayout.EAST);
         add(header, BorderLayout.NORTH);
 
-        // Chat
+        // Chat Container
         chatContainer = new JPanel();
         chatContainer.setLayout(new BoxLayout(chatContainer, BoxLayout.Y_AXIS));
         chatContainer.setBackground(BG_BASE);
@@ -63,7 +73,7 @@ public class ChatClient extends JFrame {
         scrollPane.getViewport().setBackground(BG_BASE);
         add(scrollPane, BorderLayout.CENTER);
 
-        // Footer
+        // Input
         JPanel footer = new JPanel(new BorderLayout(12, 0));
         footer.setBackground(BG_BASE);
         footer.setBorder(new EmptyBorder(20, 24, 40, 24));
@@ -88,7 +98,7 @@ public class ChatClient extends JFrame {
         messageField.addActionListener(e -> sendMessage());
 
         setVisible(true);
-        connect();
+        startServer();
     }
 
     private void addBubble(String text, boolean isMe) {
@@ -96,7 +106,6 @@ public class ChatClient extends JFrame {
             JPanel wrapper = new JPanel(new FlowLayout(isMe ? FlowLayout.RIGHT : FlowLayout.LEFT));
             wrapper.setBackground(BG_BASE);
             wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, 100));
-
 
             JPanel bubble = new JPanel() {
                 @Override
@@ -115,7 +124,7 @@ public class ChatClient extends JFrame {
             JLabel label = new JLabel("<html><p style='width: 180px;'>" + text + "</p></html>");
             label.setForeground(isMe ? ACCENT_TEXT : TEXT_PRIMARY);
             bubble.add(label);
-            
+
             wrapper.add(bubble);
             chatContainer.add(wrapper);
             chatContainer.add(Box.createVerticalStrut(10));
@@ -124,31 +133,58 @@ public class ChatClient extends JFrame {
         });
     }
 
-    private void connect() {
-        new Thread(() -> {
+    private void startServer() {
+        executor.submit(() -> {
             try {
-                Socket socket = new Socket("localhost", 5000);
-                out = new PrintWriter(socket.getOutputStream(), true);
-                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                
-                String msg;
-                while ((msg = in.readLine()) != null) {
-                    addBubble(msg, false);
+                serverSocket = new ServerSocket(5000);
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("● Listening on port 5000");
+                    statusLabel.setForeground(new Color(34, 197, 94));
+                    addBubble("Server started on port 5000", true);
+                });
+
+                while (!serverSocket.isClosed()) {
+                    Socket socket = serverSocket.accept();
+                    Logger.log("New client connected: " + socket.getRemoteSocketAddress());
+
+                    ClientHandler clientHandler = new ClientHandler(socket, clientManager);
+                    executor.submit(clientHandler);
                 }
             } catch (IOException e) {
-                addBubble("Error: No server found.", false);
+                Logger.error("Server error: " + e.getMessage());
+                SwingUtilities.invokeLater(() -> addBubble("System: Server error occurred.", false));
             }
-        }).start();
+        });
     }
 
     private void sendMessage() {
         String msg = messageField.getText().trim();
         if (!msg.isEmpty()) {
+            // Create a system message from the server
+            User serverUser = new User("Server");
+            Message message = new Message(serverUser, msg);
+
             addBubble(msg, true);
-            if (out != null) out.println(msg);
+            // Broadcast the server message to all clients
+            clientManager.broadcastMessage(message, null);
             messageField.setText("");
         }
     }
 
-    public static void main(String[] args) { new ChatClient(); }
+    @Override
+    public void onMessageReceived(Message message) {
+        // Display the received message in the server UI
+        SwingUtilities.invokeLater(() -> {
+            addBubble(message.getSender().getName() + ": " + message.getContent(), false);
+        });
+    }
+
+    @Override
+    public void onConnectionClosed() {
+        // Handle connection closed event if needed
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new ChatServer());
+    }
 }
